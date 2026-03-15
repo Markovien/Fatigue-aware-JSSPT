@@ -4,7 +4,7 @@ Created on Thu Feb 12 09:41:33 2026
 
 @author: Kader SANOGO
 
-meta_vns_scheduler.py
+meta_vns.py
 ---------------------
 
 Variable Neighborhood Search (VNS) metaheuristic for JSSPT/JSSPT-HF.
@@ -12,14 +12,6 @@ Variable Neighborhood Search (VNS) metaheuristic for JSSPT/JSSPT-HF.
 - Uses VNS algorithm for optimization.
 - Neighborhoods: Swap, Insert, Invert.
 - Shaking and First-Improvement Local Search.
-
-Usage examples:
---------------
-# Baseline JSSPT (no fatigue):
-python meta_vns_scheduler.py --instance_path bu_instances_eval/scenario_1/EX5_2_S1.json
-
-# JSSPT-HF (with fatigue):
-python meta_vns_scheduler.py --instance_path bu_instances_eval/scenario_1/EX1_1_S1.json --fatigue 1
 """
 
 from __future__ import annotations
@@ -38,81 +30,32 @@ import re
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 
-#----------------------------------------------------------
-# Helper functions: sort_files & evaluate_and_export_excel
-#----------------------------------------------------------
+# --- Quantization helpers (aligned with CP-SAT solver) ---
+FAT_SCALE = 1000  # 3 decimal digits grid: 0..1000
 
-def sort_files(directory, save_index=False, index_filename="index.json"):
-    """
-    Lists and sorts files in a directory according to:
-      - First: subindex (_1, _2, _3, _4, ...)
-      - Second: experiment number (EX1..EX10..)
-    """
-    files = [
-        os.path.join(directory, f)
-        for f in os.listdir(directory)
-        if f.lower().endswith(".json")
-    ]
-    pattern = re.compile(r'EX(\d+)_([0-9]+)_')
 
-    def sort_key(path):
-        match = pattern.search(os.path.basename(path))
-        if match:
-            experiment = int(match.group(1))
-            subindex   = int(match.group(2))
-            return (subindex, experiment)
-        return (9999, 9999)
+def round_half_up(x: float) -> int:
+    """Standard rounding: fractional part >= .5 rounds up."""
+    return int(math.floor(x + 0.5))
 
-    sorted_files = sorted(files, key=sort_key)
-    if save_index:
-        index_path = os.path.join(directory, index_filename)
-        with open(index_path, "w") as f:
-            json.dump(sorted_files, f, indent=4)
-        print(f"✔ Index saved: {index_path}")
 
-    return sorted_files
+def clamp_int(x: int, lo: int, hi: int) -> int:
+    return lo if x < lo else hi if x > hi else x
 
-def evaluate_and_export_excel(root, excel_path="VNS_results.xlsx"):
-    files = sort_files(root)
-    results = []
 
-    for inst_path in files:
-        instance = load_jsspt_instance(inst_path)
-        # Solve using VNS
-        status, cmax, bct, cpu, kpis = solve_jsspt_vns(
-                instance=instance,
-                use_fatigue=1,
-                last_ttask=1,
-                num_robots=None,
-                time_limit=60,
-                k_max=15,                  # VNS param
-                max_no_improv=500,        # VNS param (optional stop criteria)
-                recover_on_idle=None,
-                idle_recovery_factor=1.0,
-                make_gantt=True,
-                gantt_path=None,
-                to_plot=False
-            )
+def quantize_fatigue(F: float) -> int:
+    """Map fatigue in [0,1] to integer grid 0..FAT_SCALE using Python round()."""
+    return clamp_int(int(round(FAT_SCALE * F)), 0, FAT_SCALE)
 
-        results.append({
-            "instance": os.path.basename(inst_path)[:-7].replace('_', ''),
-            "cmax": cmax,
-            "status": status,
-            "cpu": bct,
-            **kpis
-        })
 
-        inst_name = os.path.basename(inst_path)[:-7].replace('_', '')
-        #print("Done:", status, cmax, f"{cpu:.2f}s")
-        print(f"Instance: {inst_name} | Best Cmax: {cmax:.2f} | Best Cmax time: {bct:.2f}s | Time limit: {cpu:.2f}s")
-        print("=== KPIs ===")
-        for k, v in kpis.items():
-            print(f"{k}: {v}")
-        print("=== End KPIs ===\n")
-
-    df = pd.DataFrame(results)
-    df.to_excel(excel_path, index=False)
-    print(f"\n📌 Results exported to: {excel_path}")
+def to_int_fatigue_params(Fmin, Fmax, L: int = FAT_SCALE):
+    """Convert fatigue thresholds to integer grid 0..L (floor for min, ceil for max)."""
+    fmin = [None]
+    fmax = [None]
+    for k in range(1, len(Fmin)):
+        fmin.append(int(math.floor(L * Fmin[k])))
+        fmax.append(int(math.ceil(L * Fmax[k])))
+    return fmin, fmax
 
 #----------------------------------------------------------
 # KPIs computing functions (Identical to GA)
@@ -161,9 +104,6 @@ def kpi_total_rest(fatigue_log):
 
 def kpi_fatigue_accumulation(fatigue_log):
     return sum(Fs * (e - s) for (_, s, e, Fs, Fe, rest) in fatigue_log if not rest)
-
-def kpi_tradeoff(Cmax, Facc, alpha=0.5):
-    return alpha*Cmax + (1-alpha)*Facc
 
 # ---------------------------------------------------------------------------
 # Instance loading & Params
@@ -216,6 +156,9 @@ def build_delta_params(instance: Dict) -> Dict[Tuple[int, int, int], float]:
     default_val = float(delta_meta.get("value", 0.0))
 
     delta_ijk: Dict[Tuple[int, int, int], float] = {}
+
+    a,b,c,d=build_fatigue_params(instance) # c is the lambda_k list
+
     for i, job in enumerate(jobs_data):
         for j, op in enumerate(job["ops"]):
             m_idx = op["machine_index"]
@@ -223,8 +166,13 @@ def build_delta_params(instance: Dict) -> Dict[Tuple[int, int, int], float]:
                 d = float(op["delta"])
             else:
                 dur = float(op["duration"])
-                if mode == "per_op_duration":
-                    d = 0.1 if dur <= 10 else (0.3 if dur <= 15 else 0.5)
+                if mode == "per_op_machine_duration":
+                    if dur <= 10:
+                        d = (0.1 / c[m_idx]) * math.log(2)
+                    elif dur <= 15:
+                        d = (0.3 / c[m_idx]) * math.log(2)
+                    else:
+                        d = (0.5 / c[m_idx]) * math.log(2)
                 else:
                     d = default_val
             delta_ijk[(i, j, m_idx)] = d
@@ -354,14 +302,14 @@ def _plot_gantt_hf(inst_id, layout_id, cmax_value, machine_sched, machine_rest_s
         m_logs = [log for log in fatigue_log if log[0] == m]
         m_logs.sort(key=lambda x: x[1])
         m_color = mcolors[(m - 1) % len(mcolors)]
-        
+
         # Thresholds
         ax_fat.axhline(Fmax_per_machine[m], color=m_color, linestyle='--', alpha=0.2)
         ax_fat.axhline(Fmin_per_machine[m], color=m_color, linestyle='--', alpha=0.2)
 
         for i, (m_id, s, e, Fs, Fe, is_recovery) in enumerate(m_logs):
             if e <= s: continue
-            
+
             # Connect gaps with constant fatigue line
             if i > 0:
                 prev_e = m_logs[i-1][2]
@@ -389,7 +337,7 @@ def _plot_gantt_hf(inst_id, layout_id, cmax_value, machine_sched, machine_rest_s
                     f_vals = 1.0 - (1.0 - Fs) * np.exp(-lam * (t_vals - s))
                 else:
                     f_vals = np.full_like(t_vals, Fs)
-            
+
             # Add label only for the first segment of each machine to avoid duplicate legend entries
             label = f"M{m}" if i == 0 else None
             ax_fat.plot(t_vals, f_vals, color=m_color, linewidth=2, alpha=0.8, label=label)
@@ -562,29 +510,39 @@ def solve_jsspt_vns(
 
         def decode_schedule_hf(seq: List[int]):
             job_next_op = [0]*J
-            job_last_op_end = [0.0]*J
-            machine_time = [0.0]*(M+1)
-            F_k = list(F_min_k) # Copy initial fatigue
-            robot_time = [0.0]*R
+            job_last_op_end = [0]*J  # int time
+            machine_time = [0]*(M+1)  # int time
+            fmin_int, fmax_int = to_int_fatigue_params(F_min_k, F_max_k, L=FAT_SCALE)
+            f_k = [0]*(M+1)
+            for kk in range(1, M+1):
+                f_k[kk] = fmin_int[kk]
+            robot_time = [0]*R  # int time
             robot_loc = [0]*R
             machine_used = [False] * (M + 1)
 
-            op_times = {}
-            op_fatigue = {}
-            transports = []
-            machine_rests = []
-            idle_rests = []
-
+            # Schedules
+            op_times: Dict[Tuple[int, int], Tuple[float, float]] = {}
+            op_fatigue: Dict[Tuple[int, int], Tuple[float, float]] = {}
+            transports: List[Tuple[int, int, int, float, float]] = []
+            machine_rests: List[List[float]] = []
+            idle_rests: List[Tuple[int, float, float, float, float]] = []
             def rest_to_Fmin(k, current_time):
-                F = F_k[k]
-                Fmin = F_min_k[k]
+                f = f_k[k]
+                fmin = fmin_int[k]
                 mu = mu_k[k]
-                if F <= Fmin or mu <= 0: return current_time, F
-                T_rest = (1.0/mu) * math.log(F/Fmin)
-                if T_rest < 0: T_rest = 0.0
-                end_rest = current_time + T_rest
-                machine_rests.append([k, current_time, end_rest, F, Fmin])
-                return end_rest, Fmin
+                if f <= fmin or mu <= 0: return current_time, f
+                F = f / FAT_SCALE
+                Fmin = F_min_k[k]
+                # T_rest = (1/μ) ln(F / F_min)  -> integer time via ceil
+                T_rest = (1.0 / mu) * math.log(F / Fmin)
+                if T_rest < 0:
+                    T_rest = 0.0
+                T_rest_int = int(math.ceil(T_rest))
+
+                start_rest = current_time
+                end_rest = current_time + T_rest_int
+                machine_rests.append([k, start_rest, end_rest, F, Fmin])
+                return end_rest, fmin
 
             for job_i in seq:
                 j = job_next_op[job_i]
@@ -596,14 +554,14 @@ def solve_jsspt_vns(
                 # Transport logic
                 pickup = 0 if j == 0 else op_machine[(job_i, j-1)]
                 drop = m_idx
-                travel_dur = float(sigma[pickup][drop])
-                pred_job_time = job_last_op_end[job_i] if j > 0 else 0.0
+                travel_dur = int(sigma[pickup][drop])
+                pred_job_time = job_last_op_end[job_i] if j > 0 else 0
 
                 best_robot = 0
-                best_t_end = float("inf")
-                best_t_start = 0.0
+                best_t_end = 10**18
+                best_t_start = 0
                 for r in range(R):
-                    empty_dur = float(sigma[robot_loc[r]][pickup])
+                    empty_dur = int(sigma[robot_loc[r]][pickup])
                     ready = robot_time[r] + empty_dur
                     ts = max(pred_job_time, ready)
                     te = ts + travel_dur
@@ -623,8 +581,9 @@ def solve_jsspt_vns(
                 k = m_idx
                 lam = lambda_k[k]
                 mu = mu_k[k]
-                Fmax = F_max_k[k]
-                Fmin = F_min_k[k]
+                fmax = fmax_int[k]
+                fmin = fmin_int[k]
+                Fmin_float = F_min_k[k]
 
                 earliest = job_last_op_end[job_i]
                 t_candidate = max(tT_end, earliest, machine_time[k])
@@ -632,56 +591,59 @@ def solve_jsspt_vns(
                 if rec_on_idle and t_candidate > machine_time[k] and machine_used[k]:
                     idle = t_candidate - machine_time[k]
                     if idle > 0 and mu > 0:
-                        F_before_idle = F_k[k]
+                        F_before_idle = f_k[k] / FAT_SCALE
                         F_idle = F_before_idle * math.exp(-mu * irf * idle)
-                        F_k[k] = F_idle
-                        idle_rests.append((k, machine_time[k], t_candidate, F_before_idle, F_idle))
+                        f_k[k] = quantize_fatigue(F_idle)
+                        idle_rests.append((k, machine_time[k], t_candidate, F_before_idle, f_k[k] / FAT_SCALE))
                     machine_time[k] = t_candidate
                 elif t_candidate > machine_time[k]:
                     machine_time[k] = t_candidate
-                
+
                 machine_used[k] = True
 
                 t_start = machine_time[k]
-                F = F_k[k]
+                f = f_k[k]
 
                 iter_guard = 0
                 while True:
                     iter_guard += 1
                     if iter_guard > 3: break
 
-                    if F > Fmax + 1e-9:
-                        t_start, F = rest_to_Fmin(k, t_start)
+                    if f > fmax:
+                        t_start, f = rest_to_Fmin(k, t_start)
                         machine_time[k] = t_start
-                        F_k[k] = F
+                        f_k[k] = f
 
                     d_val = delta_ijk.get((job_i, j, k), 0.0)
+                    F = f / FAT_SCALE
                     if F < -0.9999: F = -0.9999
                     tau_prime = base_tau * (1.0 + d_val * lam * math.log(1.0 + F))
                     if tau_prime < 0: tau_prime = 0.0
+                    tau_prime_int = max(1, round_half_up(tau_prime))
 
-                    if lam > 0 and tau_prime > 0:
-                        F_after = 1.0 - (1.0 - F) * math.exp(-lam * tau_prime)
+                    if lam > 0 and tau_prime_int > 0:
+                        F_after_raw = 1.0 - (1.0 - F) * math.exp(-lam * tau_prime_int)
                     else:
-                        F_after = F
+                        F_after_raw = F
+                    f_after = quantize_fatigue(F_after_raw)
 
-                    if F_after >= 1.0 - 1e-9:
-                        if F > Fmin + 1e-9:
-                            t_start, F = rest_to_Fmin(k, t_start)
+                    if f_after >= FAT_SCALE:
+                        if f > fmin:
+                            t_start, f = rest_to_Fmin(k, t_start)
                             machine_time[k] = t_start
-                            F_k[k] = F
+                            f_k[k] = f
                             continue
                         else:
-                            F_after = 1.0 - 1e-9
+                            f_after = FAT_SCALE - 1
                     break
 
                 op_start = t_start
-                op_end = op_start + tau_prime
+                op_end = op_start + tau_prime_int
                 machine_time[k] = op_end
-                F_k[k] = F_after
+                f_k[k] = f_after
                 job_last_op_end[job_i] = op_end
                 op_times[(job_i, j)] = (op_start, op_end)
-                op_fatigue[(job_i, j)] = (F, F_after)
+                op_fatigue[(job_i, j)] = (f / FAT_SCALE, f_after / FAT_SCALE)
                 job_next_op[job_i] += 1
 
             # Final Returns
@@ -691,14 +653,14 @@ def solve_jsspt_vns(
                     last_op_idx = job_n_ops[job_i] - 1
                     pickup = op_machine[(job_i, last_op_idx)]
                     drop = 0
-                    travel = float(sigma[pickup][drop])
+                    travel = int(sigma[pickup][drop])
                     pred = job_last_op_end[job_i]
 
-                    best_end = float("inf")
-                    best_start = 0.0
+                    best_end = 10**18
+                    best_start = 0
                     best_r = 0
                     for r in range(R):
-                         ready = robot_time[r] + float(sigma[robot_loc[r]][pickup])
+                         ready = robot_time[r] + int(sigma[robot_loc[r]][pickup])
                          ts = max(pred, ready)
                          te = ts + travel
                          if te < best_end:
@@ -715,7 +677,7 @@ def solve_jsspt_vns(
             if last_ttask == 1 and final_end_times:
                 cmax = max(final_end_times)
             else:
-                cmax = max(job_last_op_end) if job_last_op_end else 0.0
+                cmax = max(job_last_op_end) if job_last_op_end else 0
 
             return cmax, op_times, transports, machine_rests, op_fatigue, idle_rests
 
@@ -960,7 +922,6 @@ def solve_jsspt_vns(
         viol = kpi_fatigue_violations(fatigue_log, max(F_max_k))
         Trest = kpi_total_rest(fatigue_log)
         Facc  = kpi_fatigue_accumulation(fatigue_log)
-        trade = kpi_tradeoff(best_cmax, Facc, alpha=0.5)
     else:
         Fmax_obs = Fgrowth = Nbreaks = viol = Trest = Facc = 0
         trade = best_cmax
@@ -978,7 +939,6 @@ def solve_jsspt_vns(
         "fatigue_growth":    Fgrowth,
         "num_rest_breaks":   Nbreaks,
         "total_rest_time":  Trest,
-        "tradeoff":         trade,
     }
 
     return status_str, float(best_cmax), best_cmax_time, cpu_time, KPIs
@@ -1030,7 +990,7 @@ def parse_args() -> argparse.Namespace:
         gantt_path=args.gantt_path,
     )"""
 
-inst_path = os.path.join("bu_instances_eval", "scenario_1", "EX6_1_S1.json")
+inst_path = os.path.join("bu_instances_eval", "scenario_1", "EX3_3_S1.json")
 instance = load_jsspt_instance(inst_path)
 use_fatigue = True
 recover_flag = True
@@ -1042,13 +1002,13 @@ status, cmax, bct, cpu, kpis = solve_jsspt_vns(
     last_ttask=1,
     num_robots=None,
     time_limit=30,
-    k_max=50,
+    k_max=15,
     max_no_improv=500,
-    recover_on_idle=recover_flag,
+    recover_on_idle=False,
     idle_recovery_factor=0.5,
     make_gantt=True,
     gantt_path=None,
-    to_plot=True
+    to_plot=False
 )
 
 mode_name = "VNS-HF" if use_fatigue else "VNS"
