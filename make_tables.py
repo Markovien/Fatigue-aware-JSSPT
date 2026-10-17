@@ -1,4 +1,4 @@
-"""LaTeX tables and key numbers of the revised manuscript, computed from results/.
+"""LaTeX tables and key numbers, computed from results/.
 
     python make_tables.py --results results --out <manuscript dir>
 Writes tab_*.tex (wrapped in the revenv environment) and key_numbers.json.
