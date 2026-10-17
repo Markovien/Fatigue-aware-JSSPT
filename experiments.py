@@ -1,4 +1,4 @@
-"""Experiment runner for the CAIE revision (E0-E8).
+"""Experiment runner (E0-E8).
 
     python experiments.py <exp> [<exp> ...] [options]   exp in: e0 ... e8, all
     python experiments.py e1 e2 e7                 runs E1, then E2, then E7 (queued, never in parallel)
