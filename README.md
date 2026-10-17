@@ -54,27 +54,6 @@ algorithmic components. Run `python experiments.py --help` for all options (time
 number of runs, workers). Interrupted runs resume where they stopped.
 
 ## Citation
-If you use this repository, please cite as: `<upcoming>`
-
-### BibTeX entry
-```
-@article{ksanogo-fajsspt,
-  title={A Fatigue-aware Integrated Scheduling Framework for Automated Transportation and Human-Operated Production},
-  author={Kader Sanogo and Malek Masmoudi and Sameh T. Al-Shihabi and Ali Cheaitou and Atidel B. Hadj-Alouane},
-  journal={},
-  year={},
-  doi={}
-}
-```
-## Data sources
-
-* Bilge, Ü., Ulusoy, G. (1995). A time window approach to simultaneous scheduling of machines and
-  material handling system in an FMS. *Operations Research* 43(6), 1058–1070.
-* Deroussi, L., Norre, S. (2010), instances as reported in Homayouni, S.M., Fontes, D.B.M.M.,
-  Gonçalves, J.F. (2023). *International Transactions in Operational Research* 30(2), 688–716.
-* JSPLIB (https://github.com/tamy0612/JSPLIB), OR-Library instances ft06 and la01–la15.
-
-## Citation
 
 If you use this repository, please cite: `<upcoming>`
 
@@ -87,3 +66,11 @@ If you use this repository, please cite: `<upcoming>`
   doi={}
 }
 ```
+
+## Data sources
+
+* Bilge, Ü., Ulusoy, G. (1995). A time window approach to simultaneous scheduling of machines and
+  material handling system in an FMS. *Operations Research* 43(6), 1058–1070.
+* Deroussi, L., Norre, S. (2010), instances as reported in Homayouni, S.M., Fontes, D.B.M.M.,
+  Gonçalves, J.F. (2023). *International Transactions in Operational Research* 30(2), 688–716.
+* JSPLIB (https://github.com/tamy0612/JSPLIB), OR-Library instances ft06 and la01–la15.
