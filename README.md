@@ -25,7 +25,7 @@ validator and replayed with the exact continuous fatigue laws.
 | `fajsspt/data/` | Benchmark data (job sets, travel times), published values of the original benchmark |
 | `experiments.py` | Experiments E0–E8 of the paper (queued and resumable) |
 | `analyze.py` | Summary statistics (`results/summary.md`), including Wilcoxon tests |
-| `make_tables.py`, `make_figures.py`, `make_fig1.py` | Tables and figures of the paper, generated from `results/` |
+| `make_tables.py`, `make_figures.py`| Tables and figures of the paper, generated from `results/` |
 | `tests/self_check.py` | Cross-check of CP-SAT, decoder, validator, and replay (about 2 min) |
 
 ## Installation
