@@ -1,4 +1,4 @@
-"""Gantt charts with operator fatigue trajectories for the revised manuscript.
+"""Gantt charts with operator fatigue trajectories.
 
     python make_figures.py --results results --instance EX82 --out figures
 Produces: <inst>_SIM1.png, <inst>_SIM2.png (from OPT1), <inst>_OPT2_r0.png, <inst>_OPT2_r0.25.png
